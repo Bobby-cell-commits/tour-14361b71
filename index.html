@@ -51,6 +51,8 @@ const msg = document.getElementById('msg');
 // is dev-only — symlink swaps are invisible to HTTP caching, but a shared deploy
 // must NOT refetch 30 MB of splats on every reload.
 const BASE = new URLSearchParams(location.hash.slice(1)).get('b') ?? window.ASSET_BASE ?? '.';
+// scene-switch links must restate the fragment — navigation drops it otherwise
+document.querySelectorAll('#hud a').forEach(a => a.href = a.getAttribute('href') + location.hash);
 const bust = ['localhost', '127.0.0.1'].includes(location.hostname) ? `?v=${Date.now()}` : '';
 
 const scene = new THREE.Scene();
