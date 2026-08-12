@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>urban-grove walkthrough</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #111; color: #ddd;
+               font-family: system-ui, sans-serif; overflow: hidden; }
+  #hud { position: fixed; top: 12px; left: 12px; z-index: 10; background: rgba(0,0,0,.55);
+         padding: 10px 14px; border-radius: 8px; font-size: 13px; line-height: 1.5;
+         max-width: 340px; }
+  #hud b { color: #fff; }
+  #hud a { color: #8cf; text-decoration: none; margin-right: 10px; }
+  #hud .dim { color: #999; }
+  #msg { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 10;
+         background: rgba(0,0,0,.55); padding: 6px 12px; border-radius: 6px; font-size: 13px; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+    "gaussian-splats-3d": "https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="hud">
+  <div><b>Scenes:</b> <a href="?scene=living">living/kitchen</a> <a href="?scene=bedroom">bedroom</a></div>
+  <div style="margin-top:6px"><b>Click to walk</b> (pointer lock)</div>
+  <div>WASD move · mouse look (or arrow keys) · <b>Shift</b> run</div>
+  <div><b>T</b> rails tour ⇄ free walk · <b>P</b> autoplay tour</div>
+  <div>Q / E eye height · scroll = speed · <b>F</b> free-fly · Esc release</div>
+  <div class="dim" id="status">loading…</div>
+</div>
+<div id="msg" hidden></div>
+<script type="module">
+import * as THREE from 'three';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+import * as GaussianSplats3D from 'gaussian-splats-3d';
+
+const params = new URLSearchParams(location.search);
+const sceneName = params.get('scene') === 'bedroom' ? 'bedroom' : 'living';
+const status = document.getElementById('status');
+const msg = document.getElementById('msg');
+// asset base: same-origin by default. A share link can carry it in the URL
+// FRAGMENT (#b=<encoded url>) so the page host stays generic — the fragment never
+// reaches any server and the repo hosting this file leaks nothing. Cache-busting
+// is dev-only — symlink swaps are invisible to HTTP caching, but a shared deploy
+// must NOT refetch 30 MB of splats on every reload.
+const BASE = new URLSearchParams(location.hash.slice(1)).get('b') ?? window.ASSET_BASE ?? '.';
+const bust = ['localhost', '127.0.0.1'].includes(location.hostname) ? `?v=${Date.now()}` : '';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a1e);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 200);
+const UP = new THREE.Vector3(0, 1, 0);
+let eyeHeight = 1.6;
+camera.position.set(0, eyeHeight, 0);
+camera.lookAt(1.5, eyeHeight - 0.15, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const controls = new PointerLockControls(camera, renderer.domElement);
+renderer.domElement.addEventListener('click', () => controls.lock());
+
+// ---------- rails tour: movement constrained to the filmed camera path ----------
+let rail = null;               // { pts, look, cum, len, spacing }
+let railMode = false, railPos = 0, autoPlay = false, lookHoldUntil = 0;
+
+function railSample(s) {       // s = meters along path -> { pos, lk }
+  const { pts, look, cum, spacing } = rail;
+  let lo = 0, hi = cum.length - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= s) lo = mid; else hi = mid; }
+  const span = cum[hi] - cum[lo];
+  const f = span > 0 ? Math.min(1, Math.max(0, (s - cum[lo]) / span)) : 0;
+  const jump = pts[lo].distanceTo(pts[hi]) > 3 * spacing;   // unbridged gap: snap, don't glide
+  const pos = jump ? (f < 0.5 ? pts[lo].clone() : pts[hi].clone())
+                   : pts[lo].clone().lerp(pts[hi], f);
+  const lk = look[lo].clone().lerp(look[hi], f).normalize();
+  return { pos, lk };
+}
+function enterRails(silent) {
+  if (!rail) { toast('no camera path for this scene'); return; }
+  railMode = true;
+  let best = 0, bd = Infinity;                              // snap to nearest path sample
+  rail.pts.forEach((p, i) => { const d = p.distanceTo(camera.position); if (d < bd) { bd = d; best = i; } });
+  railPos = rail.cum[best];
+  camera.position.copy(railSample(railPos).pos);
+  if (!silent) toast('rails tour — W/S move along path · P autoplay · T free walk');
+}
+function exitRails() {
+  railMode = false; autoPlay = false;
+  eyeHeight = camera.position.y;
+  toast('free walk — T back to rails');
+}
+
+// ---------- scene + metadata load ----------
+async function init() {
+  // spawn: pose of the source camera with the best coverage (same frame as the shipping ply)
+  try {
+    const sp = await fetch(`${BASE}/${sceneName}.spawn.json${bust}`).then(r => r.ok ? r.json() : null);
+    if (sp) {
+      eyeHeight = sp.position[1];
+      camera.position.set(...sp.position);
+      camera.lookAt(...sp.lookAt);
+    }
+  } catch {}
+  // rails path (optional). Default mode is the tour when a path exists; ?mode=free opts out.
+  try {
+    const p = await fetch(`${BASE}/${sceneName}.path.json${bust}`).then(r => r.ok ? r.json() : null);
+    if (p) {
+      const spacing = p.spacing_m ?? 0.1;
+      const pts = p.samples.map(a => new THREE.Vector3(...a));
+      const look = p.look.map(a => new THREE.Vector3(...a));
+      const cum = new Float32Array(pts.length);
+      for (let i = 1; i < pts.length; i++) {
+        const d = pts[i].distanceTo(pts[i - 1]);
+        cum[i] = cum[i - 1] + (d > 3 * spacing ? spacing : d);  // teleport gaps cost one step
+      }
+      rail = { pts, look, cum, len: cum[pts.length - 1], spacing };
+      if (params.get('mode') !== 'free') enterRails(true);
+    }
+  } catch {}
+
+  // prefer the compressed .ksplat when the bundle ships one; dev serves .ply symlinks
+  let url = `${BASE}/${sceneName}.ply`, format = GaussianSplats3D.SceneFormat.Ply;
+  try {
+    const h = await fetch(`${BASE}/${sceneName}.ksplat`, { method: 'HEAD' });
+    if (h.ok) { url = `${BASE}/${sceneName}.ksplat`; format = GaussianSplats3D.SceneFormat.KSplat; }
+  } catch {}
+
+  const splats = new GaussianSplats3D.DropInViewer({
+    sharedMemoryForWorkers: false,   // plain static hosting has no COOP/COEP headers
+    gpuAcceleratedSort: false,
+    sphericalHarmonicsDegree: 2,
+  });
+  scene.add(splats);
+  try {
+    await splats.addSplatScene(`${url}${bust}`, {
+      format,   // a cache-bust query string hides the extension — always declare the format
+      splatAlphaRemovalThreshold: 5,
+      showLoadingUI: false,
+      progressiveLoad: true,
+      onProgress: (pct, label) => { status.textContent = `loading ${sceneName}: ${label ?? Math.round(pct) + '%'}`; },
+    });
+    status.textContent = `${sceneName} loaded — ` + (railMode ? 'click, then P plays the tour' : 'click to walk');
+  } catch (err) {
+    status.textContent = 'load FAILED';
+    msg.hidden = false;
+    msg.textContent = String(err?.message ?? err);
+  }
+}
+init();
+
+const keys = {};
+let flyMode = false, speed = 1.8;
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'KeyF') { flyMode = !flyMode; toast(flyMode ? 'free-fly ON' : 'walk mode (F to toggle)'); }
+  if (e.code === 'KeyT') { railMode ? exitRails() : enterRails(); }
+  if (e.code === 'KeyP') {
+    if (!railMode) enterRails(true);
+    if (railMode) { autoPlay = !autoPlay; toast(autoPlay ? 'tour playing — look around anytime' : 'tour paused'); }
+  }
+  if (!e.repeat) {   // discrete per-tap step so quick taps (and automation) move too
+    const stepR = 0.22, stepM = 0.35;
+    if (e.code.startsWith('Arrow')) {
+      lookHoldUntil = performance.now() + 2500;
+      euler.setFromQuaternion(camera.quaternion);
+      if (e.code === 'ArrowLeft')  euler.y += stepR;
+      if (e.code === 'ArrowRight') euler.y -= stepR;
+      if (e.code === 'ArrowUp')    euler.x = Math.min(1.4, euler.x + stepR);
+      if (e.code === 'ArrowDown')  euler.x = Math.max(-1.4, euler.x - stepR);
+      camera.quaternion.setFromEuler(euler);
+    }
+    if (railMode) {
+      if (e.code === 'KeyW') railPos = Math.min(rail.len, railPos + stepM);
+      if (e.code === 'KeyS') railPos = Math.max(0, railPos - stepM);
+    } else {
+      if (e.code === 'KeyW') controls.moveForward(stepM);
+      if (e.code === 'KeyS') controls.moveForward(-stepM);
+      if (e.code === 'KeyA') controls.moveRight(-stepM);
+      if (e.code === 'KeyD') controls.moveRight(stepM);
+    }
+  }
+});
+addEventListener('keyup', e => keys[e.code] = false);
+addEventListener('mousemove', e => {
+  if (controls.isLocked && (e.movementX || e.movementY)) lookHoldUntil = performance.now() + 2500;
+});
+addEventListener('wheel', e => {
+  speed = Math.min(8, Math.max(0.4, speed * (e.deltaY < 0 ? 1.15 : 0.87)));
+  toast(`speed ${speed.toFixed(1)} m/s`);
+});
+let toastTimer;
+function toast(t) {
+  msg.hidden = false; msg.textContent = t;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => msg.hidden = true, 1600);
+}
+
+// pose API: tour bookmarks + programmatic navigation (position + optional lookAt)
+window.viewerApi = {
+  setPose(pos, lookAt) {
+    if (railMode) exitRails();
+    camera.position.set(...pos);
+    eyeHeight = pos[1];
+    if (lookAt) camera.lookAt(...lookAt);
+  },
+  getPose() { return { position: camera.position.toArray(), quaternion: camera.quaternion.toArray() }; },
+  rails(on) { on ? enterRails() : exitRails(); },
+  railState() { return railMode ? { pos: railPos, len: rail.len, autoPlay } : null; },
+  tick(dt = 1 / 60) { step(dt); },   // drive frames manually (hidden tabs pause rAF — automation hook)
+};
+
+const clock = new THREE.Clock();
+const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+const tmpM = new THREE.Matrix4();
+const tmpQ = new THREE.Quaternion();
+function animate() {
+  requestAnimationFrame(animate);
+  step(Math.min(clock.getDelta(), 0.1));
+}
+function step(dt) {
+  // movement + arrow-key look work with OR without pointer lock (keyboard-only friendly)
+  const run = (keys.ShiftLeft || keys.ShiftRight) ? 2.4 : 1.0;
+  const d = speed * run * dt;
+  const rot = 1.6 * dt;
+  if (keys.ArrowLeft || keys.ArrowRight || keys.ArrowUp || keys.ArrowDown) {
+    lookHoldUntil = performance.now() + 2500;
+    euler.setFromQuaternion(camera.quaternion);
+    if (keys.ArrowLeft)  euler.y += rot;
+    if (keys.ArrowRight) euler.y -= rot;
+    if (keys.ArrowUp)    euler.x = Math.min(1.4, euler.x + rot);
+    if (keys.ArrowDown)  euler.x = Math.max(-1.4, euler.x - rot);
+    camera.quaternion.setFromEuler(euler);
+  }
+  if (railMode && rail) {
+    if (autoPlay) railPos += 0.55 * dt;               // stroll pace
+    if (keys.KeyW) railPos += d;
+    if (keys.KeyS) railPos -= d;
+    if (railPos >= rail.len) { railPos = autoPlay ? 0 : rail.len; }  // loop the tour
+    railPos = Math.max(0, Math.min(rail.len, railPos));
+    const { pos, lk } = railSample(railPos);
+    camera.position.copy(pos);
+    eyeHeight = pos.y;
+    if (autoPlay && performance.now() > lookHoldUntil) {
+      // ease toward the filmed look direction; any look input overrides for 2.5 s
+      tmpM.lookAt(pos, pos.clone().add(lk), UP);
+      tmpQ.setFromRotationMatrix(tmpM);
+      camera.quaternion.slerp(tmpQ, Math.min(1, 1.8 * dt));
+    }
+  } else {
+    if (keys.KeyW) controls.moveForward(d);
+    if (keys.KeyS) controls.moveForward(-d);
+    if (keys.KeyA) controls.moveRight(-d);
+    if (keys.KeyD) controls.moveRight(d);
+    if (keys.KeyQ) eyeHeight -= d;
+    if (keys.KeyE) eyeHeight += d;
+    if (flyMode) {
+      if (keys.Space) camera.position.y += d;
+      if (keys.KeyC) camera.position.y -= d;
+    } else {
+      camera.position.y = eyeHeight;   // walking: locked to eye height
+    }
+  }
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
