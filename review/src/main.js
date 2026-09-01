@@ -16,10 +16,16 @@ const hudEl = document.getElementById('hud');
 if (params.get('hud') === '0') { hudEl.style.display = 'none'; stateEl.style.display = 'none'; }
 if (params.get('mobile') === '1') stateEl.style.cssText += 'font-size:22px;font-weight:700;color:#0f0';
 
-// #b= (fragment — never reaches any server; the deploy_share.sh link shape) wins over ?base= (dev knob)
+// #b= (fragment — never reaches any server; the deploy_share.sh link shape) wins over ?base= (dev knob).
+// A bare slug (no '/' or ':') expands to the shares prefix — keeps partner links short while the
+// slug itself stays in the fragment, never in the public page repo (the host alone is not secret).
+const SHARES_BASE = 'https://bvvhngyjxuxxlataigfn.supabase.co/storage/v1/object/public/shares';
 const hashParams = new URLSearchParams(location.hash.slice(1));
-const BASE = (hashParams.get('b') || params.get('base') || 'assets').replace(/\/+$/, '');
-const sceneName = params.get('scene') || 'living';
+const rawB = hashParams.get('b');
+const expandedB = rawB && !/[/:]/.test(rawB) ? `${SHARES_BASE}/${rawB}` : rawB;
+const BASE = (expandedB || params.get('base') || 'assets').replace(/\/+$/, '');
+// window.VIEWER_DEFAULTS: deploy-injected page defaults (review page only; absent on dev + customer)
+const sceneName = params.get('scene') || window.VIEWER_DEFAULTS?.scene || 'living';
 // a ?scene= containing '/' is a URL scene (streamed lod-meta.json etc.); relative forms are
 // BASE-relative, absolute (scheme://, //, /-rooted) pass through. ?spawnas= names the
 // sidecars (spawn/lighting/staging) the URL form can't derive
