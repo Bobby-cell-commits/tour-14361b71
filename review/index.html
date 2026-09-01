@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>walkable splat viewer — PlayCanvas</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  SHIPPED lean PlayCanvas viewer (ADR 0001, Path B) — staging core ported from
+  prototypes/viewer-base-playcanvas/ (issues #3 + #4).
+
+  Serve any dir that can reach the data base (default: repo root):
+    python3 -m http.server 8123 -d .
+    http://localhost:8123/viewer-pc/index.html?scene=living
+
+  Params:
+    ?scene=<name|url>    scene name (default living) -> <base>/<name>.sog; a value
+                         containing / loads as a raw URL (streamed lod-meta.json)
+    ?base=<dir>          data dir (default assets): <scene>.sog, <scene>.spawn.json,
+                         [urban-grove-]<scene>.lighting.json
+    ?spawnas=<name>      sidecar name (spawn/lighting/staging) when ?scene= is a URL
+                         (default living)
+    ?device=webgpu|webgl2  graphics backend (default webgpu, auto webgl2 fallback;
+                         ?edit=1 forces webgl2 — the sync Picker returns [] on WebGPU)
+    ?dpr=<n>             render pixel ratio, clamped 0.25..native (engine default caps
+                         at min(1, devicePixelRatio))
+    ?budget=<n>          splat budget (app.scene.gsplat.splatBudget) — scales STREAMED
+                         scenes only; a flat .sog is counted as fixed cost. Default is
+                         tiered: 1M on coarse-pointer (mobile), 3M otherwise; inert on
+                         single-LOD exports until a multi-LOD asset ships
+    ?asset=<glb>&h=<m>   staged GLB (auto-normalized to height h, default 0.8)
+    ?obj=x,y,z           staged-object position (shareable review-link placement)
+    ?yaw=<deg>           staged-object yaw
+    ?staging=0           skip <scene>.staging.json (pure review-link mode)
+    ?edit=1              operator staging editor (lazy-loads src/editor.js — never in
+                         the customer path without the flag)
+    ?shadow=screen|plane|off   catcher mode (default: screen if ?asset= given or the
+                         scene has saved placements, else off)
+    ?lighting=0|1        lighting.json consumer (default: auto-apply when file exists;
+                         0 disables, 1 forces + warns if missing)
+    ?sun=x,y,z           override sun position (composes with lighting.json room_centre)
+    ?op=<0..1>           override shadow strength (wins over the advisory opacity)
+    ?rot=x,y,z           splat entity euler (default 0,0,0 — scenes are canonical-upright)
+    ?continuous=1        disable render-on-demand (render every rAF; use to measure fps)
+    ?mobile=1            big phone-readable HUD state line
+    ?hud=0               hide the HUD
+  Automation: window.viewerApi (setPose/controls/setObject/setShadow/setLighting/
+              getState/tick/requestRender)
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #111; color: #ddd;
+               font-family: system-ui, sans-serif; overflow: hidden; }
+  #hud { position: fixed; top: 12px; left: 12px; z-index: 10; background: rgba(0,0,0,.6);
+         padding: 10px 14px; border-radius: 8px; font-size: 12.5px; line-height: 1.45;
+         max-width: 420px; }
+  #hud b { color: #fff; }
+  #hud .title { color: #6cf; font-weight: 700; }
+  #hud .dim { color: #999; }
+  #state { position: fixed; bottom: 12px; left: 12px; z-index: 10; background: rgba(0,0,0,.6);
+           padding: 8px 12px; border-radius: 8px; font-size: 12px; font-family: monospace;
+           white-space: pre; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "playcanvas": "https://cdn.jsdelivr.net/npm/playcanvas@2.21.4/+esm"
+  }
+}
+</script>
+</head>
+<body>
+<div id="hud">
+  <div class="title">walkable splat viewer — PlayCanvas 2.21.4</div>
+  <div><b>Camera:</b> drag = orbit · WASD = fly · wheel = zoom</div>
+  <div><b>Keys:</b> B box/asset · V ghost · N hide object · H shadow off→plane→screen</div>
+  <div class="dim" id="status">loading…</div>
+</div>
+<div id="state"></div>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
