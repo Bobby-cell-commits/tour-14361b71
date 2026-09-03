@@ -28,7 +28,18 @@
 // plays itself and ◀ ▶ ⏸ are real on-screen buttons. That is the point of the pilot mode.
 import { Vec3 } from 'playcanvas';
 
-const PLAY_SPEED = 1.0;      // m/s along the path — a walking pace (the old player used 0.55)
+const PLAY_SPEED = 0.5;      // m/s along the path — owner feel pass 2026-09-03: 1.0 was "definitely too fast"
+// One-pass tour (owner 2026-09-03): an interior capture is the SAME route walked 2–3 times at
+// different heights (docs/CAPTURE-INTERIOR.md), so the raw path is 2–3× the tour. The tour ends
+// where the first pass ends: the first point after which ≥ FIRST_PASS_REVISIT of the remaining
+// samples lie within FIRST_PASS_R of the path already walked (living: 30.4 of 65.7 m — the crouch
+// pass starts right there; bedroom, one loop: no cut). A cut must drop ≥ FIRST_PASS_MIN_DROP of
+// the path or it is noise (a loop's final approach is a revisit too). Override: path.json
+// `tour.end_m` (operator) or the `endM` option (?tour_end=).
+const FIRST_PASS_R = 0.6;          // m — "the same route" tolerance (= the navmesh corridor half-width)
+const FIRST_PASS_REVISIT = 0.97;   // fraction of the remaining samples that must be revisits
+const FIRST_PASS_MIN_M = 8;        // never cut a tour shorter than this
+const FIRST_PASS_MIN_DROP = 0.15;  // a cut must remove at least this fraction of the raw path
 const STEP_M = 1.0;          // ◀ / ▶ / ArrowLeft / ArrowRight step, metres of path
 const LOOK_EASE = 1.8;       // per-second lerp rate easing the aim back to the filmed look
 const LOOK_HOLD_MS = 2500;   // after any look input, keep the user's aim this long
@@ -64,7 +75,49 @@ export function buildPath(json, file = null) {
     const d = pts[i].distance(pts[i - 1]);
     cum[i] = cum[i - 1] + (d > jumpGap ? spacing : d);
   }
-  return { pts, dirs, cum, spacing, jumpGap, file, count: pts.length, len: cum[pts.length - 1] };
+  const rawLen = cum[pts.length - 1];
+  const tourEnd = firstPassEnd(pts, cum);
+  const operatorEnd = Number(json.tour?.end_m);
+  const tourLen = Number.isFinite(operatorEnd) && operatorEnd > 0 ? Math.min(operatorEnd, rawLen) : tourEnd;
+  return { pts, dirs, cum, spacing, jumpGap, file, count: pts.length, len: rawLen,
+           tourLen, tourCut: tourLen < rawLen - 1e-6 ? (Number.isFinite(operatorEnd) && operatorEnd > 0 ? 'operator' : 'first-pass') : null };
+}
+
+/**
+ * Metres along the path where the FIRST pass ends (see the constants above). O(n²) in XZ on
+ * the resampled path — ~700 samples for a flat, once at load. Returns the raw length when no
+ * cut qualifies.
+ */
+export function firstPassEnd(pts, cum) {
+  const n = pts.length;
+  const rawLen = cum[n - 1];
+  if (rawLen < FIRST_PASS_MIN_M * 2) return rawLen;
+  const r2 = FIRST_PASS_R * FIRST_PASS_R;
+  // nearest-before-cut distance² for every sample, updated incrementally as the cut advances
+  const near = new Float64Array(n).fill(Infinity);
+  let c = 0;
+  while (c < n - 1 && cum[c] < FIRST_PASS_MIN_M) c++;
+  for (let j = 0; j < c; j++) {                       // prime with everything before the first candidate
+    const pj = pts[j];
+    for (let i = j + 1; i < n; i++) {
+      const dx = pts[i].x - pj.x, dz = pts[i].z - pj.z, d2 = dx * dx + dz * dz;
+      if (d2 < near[i]) near[i] = d2;
+    }
+  }
+  for (; c < n - 1; c++) {
+    let hits = 0;
+    for (let i = c; i < n; i++) if (near[i] <= r2) hits++;
+    if (hits / (n - c) >= FIRST_PASS_REVISIT) {
+      const cutLen = cum[c];
+      return (rawLen - cutLen) / rawLen >= FIRST_PASS_MIN_DROP ? cutLen : rawLen;
+    }
+    const pc = pts[c];                                // sample c joins the "walked" set
+    for (let i = c + 1; i < n; i++) {
+      const dx = pts[i].x - pc.x, dz = pts[i].z - pc.z, d2 = dx * dx + dz * dz;
+      if (d2 < near[i]) near[i] = d2;
+    }
+  }
+  return rawLen;
 }
 
 /**
@@ -101,9 +154,16 @@ const focusTmp = new Vec3();
  * @param {object} o - {camera (Entity with the cameraControls script), path (buildPath result),
  *   requestRender, onStatus, onBeforeEnter (main.js: exit walk first — mutual exclusion)}
  */
-export function createRails({ camera, path, requestRender, onStatus = () => {}, onBeforeEnter = () => {} }) {
+export function createRails({ camera, path, requestRender, onStatus = () => {}, onBeforeEnter = () => {},
+                              eyeY = null, endM = null }) {
   const canvas = document.querySelector('canvas');
-  const { pts, dirs, cum, len, jumpGap } = path;
+  const { pts, dirs, cum, jumpGap } = path;
+  // tour length: ?tour_end= (endM) > path.json tour.end_m / first-pass cut (path.tourLen) > raw
+  const len = Number.isFinite(endM) && endM > 0 ? Math.min(endM, path.len) : path.tourLen;
+  // Fixed eye height (owner 2026-09-03): the filmed height (0.84–2.23 m on living) is how the
+  // capture was made, not how a tour should feel — "very jarring". The camera rides the path in
+  // XZ at eyeY (main.js passes the spawn eye, the same height the walk stands at); null = filmed.
+  const fixedY = Number.isFinite(eyeY) ? eyeY : null;
 
   let active = false;
   let playing = false;
@@ -159,6 +219,7 @@ export function createRails({ camera, path, requestRender, onStatus = () => {}, 
   /** Put the camera on the rail at `s`, aiming along the filmed look direction. */
   function place() {
     sampleAt(s, posTmp, dirTmp);
+    if (fixedY != null) posTmp.y = fixedY;
     smoothDir.copy(dirTmp);
     camera.setPosition(posTmp);
     aimAlong(smoothDir);
@@ -329,6 +390,7 @@ export function createRails({ camera, path, requestRender, onStatus = () => {}, 
     if (!active || !playing) return;
     s = Math.min(len, s + PLAY_SPEED * Math.min(dt, 0.1));
     sampleAt(s, posTmp, dirTmp);
+    if (fixedY != null) posTmp.y = fixedY;
     camera.setPosition(posTmp);
     if (performance.now() < lookHoldUntil) {
       smoothDir.copy(camera.forward);         // hold the user's aim; keep advancing the position
@@ -353,10 +415,12 @@ export function createRails({ camera, path, requestRender, onStatus = () => {}, 
     state() {
       const c = camera.getPosition();
       let offPath = null;
-      if (active) { sampleAt(s, posTmp, dirTmp); offPath = +posTmp.distance(c).toFixed(3); }
+      if (active) { sampleAt(s, posTmp, dirTmp); if (fixedY != null) posTmp.y = fixedY; offPath = +posTmp.distance(c).toFixed(3); }
       return {
         available: true, mode: 'rails', active, playing,
-        s_m: +s.toFixed(2), length_m: +len.toFixed(2),
+        s_m: +s.toFixed(2), length_m: +len.toFixed(2), raw_length_m: +path.len.toFixed(2),
+        cut: len < path.len - 1e-6 ? (Number.isFinite(endM) && endM > 0 ? 'url' : path.tourCut) : null,
+        eye_y: fixedY, play_speed: PLAY_SPEED,
         index: indexAt(s), samples: path.count, spacing_m: path.spacing,
         file: path.file, aimed, offPath_m: offPath,
         camera: [c.x, c.y, c.z].map(v => +v.toFixed(3)),

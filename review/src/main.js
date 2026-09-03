@@ -252,7 +252,12 @@ catcher.setCasterEntity(obj);
 // NaN reached uShadowStrength and mix(1.0, s.r, NaN) rendered the WHOLE splat black (F-35).
 const opOverride = numParam('op', { min: 0, max: 1 });
 if (opOverride != null) catcher.set({ strength: opOverride });
-const shadowParam = params.get('shadow') ?? (glbUrl ? 'screen' : 'off');
+// F-34 (owner-measured 2026-09-03, OnePlus 8T, landscape, ?continuous=1): screen catcher ON
+// 23–25 fps vs OFF 37–39 fps — the shadow pass costs ~35 % of the frame on a 2020 mid-range
+// phone, over the 30 % line the run-sheet pre-committed. Default OFF on coarse pointers;
+// ?shadow= still forces any mode on any device (the A/B links stay valid).
+const shadowDefaultOn = matchMedia('(pointer: fine)').matches;
+const shadowParam = params.get('shadow') ?? (glbUrl && shadowDefaultOn ? 'screen' : 'off');
 if (shadowParam !== 'off') catcher.setMode(shadowParam);   // warm-frame gate defers internally
 
 // --- staging document (issue #5): saved placements load in the customer path;
@@ -314,7 +319,7 @@ const docReady = Promise.all([
             : Promise.resolve(null),
 ]).then(async ([lj, sj, cj, vj, nj, pj]) => {
   if (pj) {
-    console.log('[viewer] path.json loaded', JSON.stringify({ file: pj.file, samples: pj.count, length_m: +pj.len.toFixed(2) }));
+    console.log('[viewer] path.json loaded', JSON.stringify({ file: pj.file, samples: pj.count, raw_length_m: +pj.len.toFixed(2), tour_length_m: +pj.tourLen.toFixed(2), cut: pj.tourCut }));
     mountRails(pj);
   }
   if (vj) window.__collision = vj.collision;   // debug/automation handle (walk gates, #5 occupancy poking)
@@ -332,9 +337,10 @@ const docReady = Promise.all([
     stagingState = { loaded: true, file: sj._file, count: doc.placements.length };
     if (opOverride == null && sj.shadow?.strength != null) catcher.set({ strength: sj.shadow.strength });   // coerced in catcher.set (F-30)
     // saved placements want their shadows even with no ?asset= (the boot default was 'off')
-    if (params.get('shadow') == null && doc.placements.length && catcher.state().mode === 'off' && catcher.state().pending === null) {
+    if (params.get('shadow') == null && shadowDefaultOn && doc.placements.length && catcher.state().mode === 'off' && catcher.state().pending === null) {
       catcher.setMode('screen');
     }
+    if (params.get('shadow') == null && !shadowDefaultOn && doc.placements.length) console.log('[viewer] contact shadows default OFF on a coarse pointer (F-34: ~35 % of the frame on a 2020 phone) — ?shadow=screen to force');
     console.log('[viewer] staging.json applied', JSON.stringify(stagingState));
   }
   requestRender();
@@ -397,6 +403,8 @@ let rails = null;
 function mountRails(path) {
   rails = createRails({
     camera, path, requestRender,
+    eyeY: spawn?.position?.[1] ?? null,                       // fixed tour height = the spawn eye (owner 2026-09-03)
+    endM: numParam('tour_end', { min: 1, max: 10_000 }),      // metres; overrides the first-pass cut for A/Bs
     onStatus: s => { status.textContent = s; },
     // whoever calls enter() — key, button or viewerApi — leaves walk off
     onBeforeEnter: () => { if (walk?.active) { walk.exit(); syncWalkBtn(); } },
