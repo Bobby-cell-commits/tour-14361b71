@@ -1,0 +1,25 @@
+PlayCanvas engine + official camera-controls script, VENDORED (F-28, 2026-09-02).
+
+Why: the importmap used to point at jsDelivr, so every delivered tour fetched the engine
+at runtime — one CDN outage/geo-block takes every customer link dark at once, with no SRI
+and no CSP. The bundle is now self-contained; scripts/package_viewer_pc.sh gates on it
+(exit 9: no absolute external URL may reappear in the bundled html/js).
+
+Fetched 2026-09-02 with curl + a browser User-Agent (bare urllib is killed by some CDNs —
+.claude/rules/known-issues.md):
+
+  playcanvas.mjs        https://cdn.jsdelivr.net/npm/playcanvas@2.21.4/+esm
+                        sha256 add850391c2e5370894713cef34f9907921f476d5dbc825ac49b4b363c15bfdf
+                        2349429 bytes — byte-exact copy of what the importmap served before.
+                        NB this is a jsDelivr-GENERATED rollup+esbuild bundle of
+                        playcanvas@2.21.4/build/playcanvas/src/index.js, not a published
+                        package file, so it is not SRI-pinnable upstream; the sha above is
+                        our pin. Its trailing //# sourceMappingURL=/sm/... is a jsDelivr
+                        path that 404s locally — harmless, devtools-only.
+  camera-controls.mjs   https://cdn.jsdelivr.net/npm/playcanvas@2.21.4/scripts/esm/camera-controls.mjs
+                        sha256 30b616616aca43a03e6ee56f69433c3215d4aefff6c33781afa2d99a05fde9d3
+  LICENSE               https://cdn.jsdelivr.net/npm/playcanvas@2.21.4/LICENSE  (MIT)
+                        sha256 42fa51ddd556be151a29f381fb97ee975825dcc454e805ea3ea9c079cca04d34
+
+Upgrading: re-fetch all three at the new version, update index.html's importmap comment,
+re-run scripts/package_viewer_pc.sh (the URL gate) and the walk gates.

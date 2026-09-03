@@ -225,9 +225,12 @@ export function createCatcher(app, camera, { requestRender = () => {}, floorSize
     if (mode === 'screen') updateShadowRT();
     rtCam.enabled = mode === 'screen';
     refreshCasters();
-    // hidden tabs' rAF is throttled — force-settle real frames so a mode flip doesn't
-    // read as ~10 s of black splat when screenshotting from a background tab
-    if (document.hidden) for (let i = 0; i < 3; i++) { app.update(1 / 60); app.render(); }
+    // hidden tabs' rAF is throttled (Chrome/Linux: ZERO rAF) — force-settle real frames so a
+    // mode flip doesn't read as ~10 s of black splat when screenshotting from a background
+    // tab. app.render() ONLY: this runs inside a postrender handler, and app.update() would
+    // re-enter the 'update' event and advance walk physics 3 extra steps as a side effect of
+    // a shadow flip (F-38). Rendering is what warms the material; simulation is not needed.
+    if (document.hidden) for (let i = 0; i < 3; i++) app.render();   // render() is direct (autoRender-independent)
     settleLeft = SETTLE_RENDERS;   // visible tabs settle via rAF-paced postrender pumps
     requestRender();
     console.log('[viewer] shadow', JSON.stringify({ ...cfg, pending: pendingMode }));
@@ -243,22 +246,29 @@ export function createCatcher(app, camera, { requestRender = () => {}, floorSize
 
   // sun DIRECTION only — opacity/strength is a separate concern (the rig's setLighting
   // mutated the shared shadowCfg; this seam is why that coupling is gone)
+  const v3ok = a => Array.isArray(a) && a.length === 3 && a.every(Number.isFinite);
   function setSun(o = {}) {
-    if (o.euler) shadowSun.setEulerAngles(...o.euler);
-    else if (o.position && o.lookAt) { shadowSun.setPosition(...o.position); shadowSun.lookAt(...o.lookAt); }
+    if (o.euler) { if (!v3ok(o.euler)) return; shadowSun.setEulerAngles(...o.euler); }
+    else if (v3ok(o.position) && v3ok(o.lookAt)) { shadowSun.setPosition(...o.position); shadowSun.lookAt(...o.lookAt); }
+    else return;
     const e = shadowSun.getEulerAngles();
     cfg.euler = [e.x, e.y, e.z].map(v => +v.toFixed(1));
     requestRender();
   }
 
+  // Every numeric here is operator-supplied data (staging.json's shadow.strength, ?op=, the
+  // editor slider, viewerApi) and cfg is read back by editor/ui.js AND pushed into shader
+  // uniforms — so coerce + clamp at the boundary. A string used to survive into an innerHTML
+  // template (stored XSS, F-30) and a NaN into mix(1.0, s.r, NaN) (black splat, F-35).
+  const clamp = (v, lo, hi, def) => (Number.isFinite(Number(v)) ? Math.min(Math.max(Number(v), lo), hi) : def);
   function set(o = {}) {
     if (typeof o === 'string') o = { mode: o };
-    if (o.strength !== undefined) cfg.strength = o.strength;
-    if (o.tol !== undefined) cfg.tol = o.tol;
-    if (o.debugRT !== undefined) cfg.debugRT = o.debugRT;
+    if (o.strength !== undefined) cfg.strength = clamp(o.strength, 0, 1, cfg.strength);
+    if (o.tol !== undefined) cfg.tol = clamp(o.tol, 0, 10, cfg.tol);
+    if (o.debugRT !== undefined) cfg.debugRT = !!o.debugRT;
     if (o.euler) setSun({ euler: o.euler });
-    if (o.penumbra !== undefined) shadowSun.light.penumbraSize = o.penumbra;
-    if (o.intensity !== undefined) shadowSun.light.shadowIntensity = o.intensity;
+    if (o.penumbra !== undefined) shadowSun.light.penumbraSize = clamp(o.penumbra, 0, 100, shadowSun.light.penumbraSize);
+    if (o.intensity !== undefined) shadowSun.light.shadowIntensity = clamp(o.intensity, 0, 1, shadowSun.light.shadowIntensity);
     if (o.mode !== undefined) setMode(o.mode);
     requestRender();
   }

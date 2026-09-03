@@ -43,6 +43,8 @@ export function createUi({ doc, catcher, sceneName, controller }) {
   root.appendChild(panel);
   document.body.appendChild(root);
 
+  // el() is for STATIC markup only — never interpolate data into it (see the slider below,
+  // which used to template catcher.state().strength straight into an attribute: F-30).
   const el = html => { const d = document.createElement('div'); d.innerHTML = html; return d.firstElementChild; };
 
   // catalog values and ?scene= are data, not markup — build with DOM methods, never innerHTML
@@ -56,7 +58,9 @@ export function createUi({ doc, catcher, sceneName, controller }) {
   for (const a of doc.catalog?.assets ?? []) {
     const b = el('<button class="pal-item" type="button"><img alt=""><span></span></button>');
     const img = b.querySelector('img');
-    img.src = a.thumb ? doc.resolveUrl(a.thumb) : '';   // base-relative like entry.glb
+    const thumbUrl = a.thumb ? doc.resolveUrl(a.thumb) : null;   // base-relative like entry.glb;
+    if (thumbUrl) img.src = thumbUrl;                            // null = refused cross-origin (F-29)
+    else img.style.display = 'none';
     img.addEventListener('error', () => { img.style.display = 'none'; });
     const span = b.querySelector('span');
     const name = document.createElement('b');
@@ -90,7 +94,16 @@ export function createUi({ doc, catcher, sceneName, controller }) {
 
   // shadow strength
   panel.appendChild(el('<div class="shadow-lbl">shadow strength</div>'));
-  const slider = el(`<input type="range" min="0" max="1" step="0.01" value="${catcher.state().strength}">`);
+  // DOM methods, not a template: strength is data that reaches here from staging.json
+  // (`shadow.strength`) via catcher.set — the one value in this file that is neither a
+  // catalog entry nor ?scene=, which is exactly why the innerHTML rule was missed (F-30).
+  // catcher.set now coerces too; this is the second half of the same fix.
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.min = '0';
+  slider.max = '1';
+  slider.step = '0.01';
+  slider.value = String(Number(catcher.state().strength) || 0);
   slider.addEventListener('input', () => controller.api.setShadowStrength(parseFloat(slider.value), false));
   slider.addEventListener('change', () => controller.api.setShadowStrength(parseFloat(slider.value), true));
   panel.appendChild(slider);

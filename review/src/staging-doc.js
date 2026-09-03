@@ -31,7 +31,8 @@ export async function loadCatalog(base) {
   return null;
 }
 
-export function createStagingDoc(app, catcher, { requestRender = () => {}, base = 'assets' } = {}) {
+export function createStagingDoc(app, catcher, { requestRender = () => {}, base = 'assets',
+                                                 allowUrl = () => true } = {}) {
   const placements = [];          // [{id, asset, pos:[x,0,z], yaw, scale}] — runtime id, not serialized
   const entities = new Map();     // id -> wrap entity
   const owners = new Map();       // wrap entity -> id (picker parent-walk lookup)
@@ -39,7 +40,19 @@ export function createStagingDoc(app, catcher, { requestRender = () => {}, base 
   let catalog = null;
   let nextId = 1;
 
-  const resolveUrl = rel => /^(https?:)?\//.test(rel) ? rel : `${base}/${rel}`;
+  // catalog entries are operator-supplied data: an absolute glb/thumb url used to pass
+  // straight through, so a crafted catalog.json could pull cross-origin content onto the
+  // page. Same allowlist as the base itself (F-29); a refused url resolves to null.
+  const resolveUrl = (rel) => {
+    if (rel == null) return null;
+    const url = /^(https?:)?\//.test(rel) ? rel : `${base}/${rel}`;
+    if (allowUrl(url)) return url;
+    console.warn('[staging] refused cross-origin catalog url', url);
+    return null;
+  };
+
+  // placement numerics are data too — a string or a NaN here becomes a NaN entity transform
+  const num = (v, def) => (Number.isFinite(Number(v)) ? Number(v) : def);
 
   function ensureTemplate(assetId) {
     if (templates.has(assetId)) return templates.get(assetId);
@@ -47,7 +60,9 @@ export function createStagingDoc(app, catcher, { requestRender = () => {}, base 
     const p = !entry
       ? Promise.resolve(null)
       : new Promise(resolve => {
-        const asset = new Asset(`catalog-${assetId}`, 'container', { url: resolveUrl(entry.glb) });
+        const glbUrl = resolveUrl(entry.glb);
+        if (!glbUrl) { console.warn('[staging] catalog asset has no loadable glb url', assetId); resolve(null); return; }
+        const asset = new Asset(`catalog-${assetId}`, 'container', { url: glbUrl });
         asset.once('load', () => resolve(normalizeGlb(app, asset, entry.targetH ?? 0.8, entry.glb)));
         asset.once('error', err => { console.warn('[staging] asset load failed', assetId, err); resolve(null); });
         app.assets.add(asset);
@@ -99,7 +114,11 @@ export function createStagingDoc(app, catcher, { requestRender = () => {}, base 
   async function add({ asset, pos = [0, 0, 0], yaw = 0, scale = 1 }) {
     const tpl = await ensureTemplate(asset);
     if (!tpl) { console.warn('[staging] unknown/failed asset — skipped', asset); return null; }
-    const placement = { id: `p${nextId++}`, asset, pos: [pos[0], 0, pos[2]], yaw, scale };
+    const placement = {
+      id: `p${nextId++}`, asset,
+      pos: [num(pos[0], 0), 0, num(pos[2], 0)],
+      yaw: num(yaw, 0), scale: num(scale, 1),
+    };
     const entity = tpl.entity.clone();
     entity.enabled = true;
     restore(placement, entity);
@@ -110,7 +129,10 @@ export function createStagingDoc(app, catcher, { requestRender = () => {}, base 
     if (catalogJson) catalog = catalogJson;
     if (!stagingJson?.placements) return;
     for (const raw of stagingJson.placements) {
-      if (!raw?.asset || !Array.isArray(raw.pos)) { console.warn('[staging] malformed placement skipped', raw); continue; }
+      if (!raw?.asset || typeof raw.asset !== 'string' || !Array.isArray(raw.pos) || raw.pos.length < 3
+          || !Number.isFinite(Number(raw.pos[0])) || !Number.isFinite(Number(raw.pos[2]))) {
+        console.warn('[staging] malformed placement skipped', raw); continue;
+      }
       await add(raw);
     }
   }

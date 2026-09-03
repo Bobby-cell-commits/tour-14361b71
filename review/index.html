@@ -4,9 +4,40 @@
 <meta charset="utf-8">
 <title>walkable splat viewer — PlayCanvas</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- CSP (F-30). 'self' only: engine + camera-controls are vendored (F-28) and the one
+     legitimate cross-origin is the Supabase shares bucket (#b= asset base, same host the
+     main.js allowlist accepts — F-29).
+       'wasm-unsafe-eval'  the recast-navigation wasm-compat build instantiates an INLINE
+                           base64 wasm module (navmesh walk); WebAssembly needs it too.
+       blob: (script/worker) the engine's gsplat sorter runs in a blob Worker.
+       'unsafe-inline' (style only) this file's <style> + the code's el.style.cssText.
+       'sha256-jf9…'    the INLINE IMPORTMAP below. An import map must be inline (external
+                        `src` is not supported), and CSP treats it as an inline script — with
+                        a bare 'self' the map is silently dropped and every bare specifier
+                        fails to resolve ("Failed to resolve module specifier \"playcanvas\"").
+                        EDITING THE IMPORTMAP CHANGES THIS HASH: package_viewer_pc.sh exit 11
+                        recomputes it and fails the bundle rather than shipping a dead page.
+     frame-ancestors/sandbox/report-uri are ignored in a <meta> CSP — don't add them here.
+     Inline <script> is NOT allowed: deploy_viewer_pc.sh injects VIEWER_DEFAULTS as an
+     external review/defaults.js for exactly this reason. -->
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src 'self' 'wasm-unsafe-eval' blob: 'sha256-jf9ut849684TZ4EbkVZNV6c3UCfY32ViZSxmTV3h3os=';
+  worker-src 'self' blob:;
+  style-src 'self' 'unsafe-inline';
+  img-src 'self' data: blob: https://bvvhngyjxuxxlataigfn.supabase.co;
+  connect-src 'self' blob: https://bvvhngyjxuxxlataigfn.supabase.co;
+  font-src 'self' data:;
+  object-src 'none';
+  base-uri 'self';
+  form-action 'none'">
 <!--
   SHIPPED lean PlayCanvas viewer (ADR 0001, Path B) — staging core ported from
   prototypes/viewer-base-playcanvas/ (issues #3 + #4).
+
+  Self-contained: the engine, camera-controls and recast-navigation are VENDORED under
+  vendor/ (F-28) — no runtime CDN fetch. scripts/package_viewer_pc.sh exit 9 fails the
+  bundle if an absolute external URL reappears in any bundled html/js.
 
   Serve any dir that can reach the data base (default: repo root):
     python3 -m http.server 8123 -d .
@@ -17,6 +48,9 @@
                          containing / loads as a raw URL (streamed lod-meta.json)
     ?base=<dir>          data dir (default assets): <scene>.sog, <scene>.spawn.json,
                          [urban-grove-]<scene>.lighting.json
+    (allowlist, F-29)    #b= / ?base= / ?scene= / ?asset= accept ONLY same-origin
+                         relative paths, the Supabase shares host, and localhost during
+                         dev; anything else is refused with a visible warning banner
     ?spawnas=<name>      sidecar name (spawn/lighting/staging) when ?scene= is a URL
                          (default living)
     ?device=webgpu|webgl2  graphics backend (default webgpu, auto webgl2 fallback;
@@ -40,10 +74,31 @@
     ?sun=x,y,z           override sun position (composes with lighting.json room_centre)
     ?op=<0..1>           override shadow strength (wins over the advisory opacity)
     ?rot=x,y,z           splat entity euler (default 0,0,0 — scenes are canonical-upright)
-    ?continuous=1        disable render-on-demand (render every rAF; use to measure fps)
+    ?collision=0         skip the <scene>.voxel.json collision sidecar (no walk mode)
+    ?walk=1              auto-enter walk mode once the collision/navmesh sidecar loads
+                         (issue #15; mouselook still needs one canvas click — pointer
+                         lock is user-gesture-gated). Walk (button, G key and this flag)
+                         is DESKTOP-ONLY — gated on matchMedia('(pointer: fine)') until
+                         the touch controller lands (issue #12); viewerApi.walk.* stays
+                         available everywhere for automation
+    ?nav=0|<name>        navmesh walk (Lane N spike): default loads <base>/<scene>.navmesh.bin
+                         and, when present, WINS over the voxel walk; <name> loads
+                         <base>/<name>.navmesh.bin (A/B builds); 0 disables (voxel walk)
+    ?navdebug=1          start with the navmesh overlay on (key M toggles it while walking)
+    ?mode=rails          auto-enter the RAILS TOUR (F-13): the camera rides the filmed
+                         capture path from <base>/<sidecar>.path.json at ~1 m/s with ZERO
+                         collision surface — the pilot-safe mode, and the only walk-like
+                         mode that is TOUCH-USABLE (◀ ▶ ⏸ are on-screen buttons). T toggles,
+                         Space pauses, arrows step ±1 m, drag looks around at any stop.
+                         No .path.json for the scene = no button and no error
+    ?rails=0             skip the <sidecar>.path.json sidecar entirely (no tour, no fetch)
+    ?continuous=1        disable render-on-demand (render every rAF; use to measure fps);
+                         only the literal '1' enables it — ?continuous=0 is OFF (F-38)
     ?mobile=1            big phone-readable HUD state line
-    ?hud=0               hide the HUD
+    ?hud=0               hide the HUD (the walk button and the tour bar have their own roots
+                         and survive)
   Automation: window.viewerApi (setPose/controls/setObject/setShadow/setLighting/
+              walk.{enter,exit,reset,setLook}/rails.{enter,exit,play,pause,step,seek,state}/
               getState/tick/requestRender)
 -->
 <style>
@@ -62,7 +117,9 @@
 <script type="importmap">
 {
   "imports": {
-    "playcanvas": "https://cdn.jsdelivr.net/npm/playcanvas@2.21.4/+esm"
+    "playcanvas": "./vendor/playcanvas/playcanvas.mjs",
+    "@recast-navigation/core": "./vendor/recast-navigation/core.mjs",
+    "@recast-navigation/wasm": "./vendor/recast-navigation/wasm-compat.js"
   }
 }
 </script>
@@ -71,11 +128,12 @@
 <div id="hud">
   <div class="title">walkable splat viewer — PlayCanvas 2.21.4</div>
   <div><b>Camera:</b> drag = orbit · WASD = fly · wheel = zoom</div>
-  <div><b>Keys:</b> B box/asset · V ghost · N hide object · H shadow off→plane→screen</div>
+  <div><b>Keys:</b> B box/asset · V ghost · N hide object · H shadow off→plane→screen · G walk · R respawn · M navmesh overlay</div>
+  <div><b>Tour:</b> T rails tour · Space play/pause · ◀ ▶ arrows step 1 m · drag = look around</div>
   <div class="dim" id="status">loading…</div>
 </div>
 <div id="state"></div>
-<script>window.VIEWER_DEFAULTS={scene:"living-lod/lod-meta.json"};</script>
+<script src="./defaults.js"></script>
   <script type="module" src="./src/main.js"></script>
 </body>
 </html>
