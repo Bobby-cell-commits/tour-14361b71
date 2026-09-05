@@ -277,7 +277,8 @@ export function createRails({ camera, path, requestRender, onStatus = () => {}, 
     `border-radius:999px;padding:${coarse ? '8px 12px' : '6px 10px'};` +
     `font:${coarse ? 15 : 13}px system-ui,sans-serif;color:#eee;white-space:nowrap;` +
     // a narrow phone must never push the transport off-screen: the bar is capped to the
-    // viewport and the READOUT is the only thing allowed to shrink (buttons stay tappable)
+    // viewport; it holds buttons only (the metres counter was removed 2026-09-05 — owner G2:
+    // with a number showing, a repeated pass reads as a loop; without it, as a tour)
     'max-width:calc(100vw - 16px);box-sizing:border-box;';
   root.appendChild(bar);
 
@@ -297,29 +298,19 @@ export function createRails({ camera, path, requestRender, onStatus = () => {}, 
   const prevBtn = mkBtn('◀', `back ${STEP_M} m (ArrowLeft)`, () => step(-1));
   const playBtn = mkBtn('⏸', 'play / pause (Space)', () => toggle());
   const nextBtn = mkBtn('▶', `forward ${STEP_M} m (ArrowRight)`, () => step(1));
-  const readout = document.createElement('span');
-  readout.style.cssText =
-    `flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;max-width:${coarse ? 108 : 118}px;` +
-    'font-variant-numeric:tabular-nums;text-align:center;color:#cfe;';
   const exitBtn = mkBtn('✕', 'leave the tour (T)', () => exit());
 
-  let uiText = null;
   function sync() {
     bar.textContent = '';
     if (!active) {
       bar.appendChild(enterBtn);
-      uiText = null;
       return;
     }
     playBtn.textContent = playing ? '⏸' : '▶';
-    const txt = `${s.toFixed(1)} / ${len.toFixed(1)} m`;
-    if (txt !== uiText) { readout.textContent = txt; uiText = txt; }
-    for (const el of [prevBtn, playBtn, nextBtn, readout, exitBtn]) bar.appendChild(el);
+    for (const el of [prevBtn, playBtn, nextBtn, exitBtn]) bar.appendChild(el);
   }
-  function syncFast() {   // per-frame path: only the readout can change
-    const txt = `${s.toFixed(1)} / ${len.toFixed(1)} m`;
-    if (txt !== uiText) { readout.textContent = txt; uiText = txt; }
-    playBtn.textContent = playing ? '⏸' : '▶';
+  function syncGlyph() {   // per-frame path: only the play/pause glyph can change (progress is
+    playBtn.textContent = playing ? '⏸' : '▶';   // still in state().s_m for the headless gates)
   }
   document.body.appendChild(root);
   sync();
@@ -402,7 +393,7 @@ export function createRails({ camera, path, requestRender, onStatus = () => {}, 
     }
     aimAlong(smoothDir);
     if (s >= len - 1e-6) { playing = false; onStatus('tour complete — ▶ replays · T exit'); }
-    syncFast();
+    syncGlyph();
     requestRender();
   }
 
