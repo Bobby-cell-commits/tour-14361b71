@@ -11,7 +11,7 @@
 // evidence workflows read getState().object); the catcher's two caster slots keep
 // the two paths from clobbering each other.
 import { Asset } from 'playcanvas';
-import { normalizeGlb } from './staging.js';
+import { normalizeGlb, entityAabb } from './staging.js';
 
 export async function loadStaging(base, scene) {
   for (const name of [`${scene}.staging.json`, `urban-grove-${scene}.staging.json`]) {
@@ -39,6 +39,9 @@ export function createStagingDoc(app, catcher, { requestRender = () => {}, base 
   const templates = new Map();    // catalog asset id -> Promise<{entity, meta} | null>
   let catalog = null;
   let nextId = 1;
+  let revision = 0;               // bumped on every placement write — boxes() memo + the walk's obstacle set key on it
+  const boxCache = new Map();     // placement id -> { key, min, max } — keyed on the document transform
+  let boxesCached = { revision: -1, list: [] };
 
   // catalog entries are operator-supplied data: an absolute glb/thumb url used to pass
   // straight through, so a crafted catalog.json could pull cross-origin content onto the
@@ -78,7 +81,37 @@ export function createStagingDoc(app, catcher, { requestRender = () => {}, base 
     e.setPosition(p.pos[0], 0, p.pos[2]);
     e.setEulerAngles(0, p.yaw, 0);
     e.setLocalScale(p.scale, p.scale, p.scale);
+    revision++;
     requestRender();
+  }
+
+  // Exact world boxes of every placement (entityAabb fromLocals — sync-independent, so a just-spawned or
+  // just-moved wrap measures right without an update tick), memoised on the document transform: the SAME
+  // array comes back while nothing changed (the walk asks per sub-step). Hoisted here from editor/pick.js
+  // (2026-09-14) because the VIEW page needs them too — placed pieces are runtime walk obstacles (#16 rider,
+  // walk-obstacles.js). A `lift` (verifier perturbation) moves the entity without the document: the box
+  // keeps y = 0, which is what the walk and the pick gate want.
+  function boxes() {
+    if (boxesCached.revision === revision) return boxesCached.list;
+    const out = [];
+    const live = new Set();
+    for (const p of placements) {
+      live.add(p.id);
+      const key = `${p.pos[0]},${p.pos[2]},${p.yaw},${p.scale}`;
+      let c = boxCache.get(p.id);
+      if (!c || c.key !== key) {
+        const e = entities.get(p.id);
+        const aabb = e ? entityAabb(e, { fromLocals: true }) : null;
+        if (!aabb) continue;
+        const mn = aabb.getMin(), mx = aabb.getMax();
+        c = { key, min: [mn.x, mn.y, mn.z], max: [mx.x, mx.y, mx.z] };
+        boxCache.set(p.id, c);
+      }
+      out.push({ id: p.id, min: c.min, max: c.max });
+    }
+    for (const id of [...boxCache.keys()]) if (!live.has(id)) boxCache.delete(id);
+    boxesCached = { revision, list: out };
+    return out;
   }
 
   function syncCasters() {
@@ -93,7 +126,7 @@ export function createStagingDoc(app, catcher, { requestRender = () => {}, base 
     entities.set(placement.id, entity);
     owners.set(entity, placement.id);
     app.root.addChild(entity);
-    applyPlacement(placement);
+    applyPlacement(placement);   // bumps revision
     syncCasters();
   }
 
@@ -106,6 +139,7 @@ export function createStagingDoc(app, catcher, { requestRender = () => {}, base 
     entities.delete(id);
     owners.delete(entity);
     if (entity) app.root.removeChild(entity);
+    revision++;
     syncCasters();
     requestRender();
     return { placement, entity };
@@ -145,16 +179,24 @@ export function createStagingDoc(app, catcher, { requestRender = () => {}, base 
     }));
   }
 
+  // serialize: v1 + an ADDITIVE per-placement `aabb` (exact world box, 3 dp, 2026-09-14) so the pipeline's
+  // navmesh report can say "a saved piece covers walked cells / the spawn" without the engine
+  // (scripts/navmesh_region.placement_metrics). Loaders ignore it (loadFrom reads asset/pos/yaw/scale).
   function serialize(scene, shadowStrength) {
+    const bx = new Map(boxes().map(b => [b.id, b]));
     return {
       scene, version: 1, saved_at: new Date().toISOString(),
-      placements: snapshot().map(({ id, ...rest }) => rest),
+      placements: snapshot().map(({ id, ...rest }) => {
+        const b = bx.get(id);
+        return b ? { ...rest, aabb: { min: b.min.map(v => round(v)), max: b.max.map(v => round(v)) } } : rest;
+      }),
       ...(shadowStrength != null ? { shadow: { strength: round(shadowStrength) } } : {}),
     };
   }
 
   return {
-    placements, applyPlacement, add, remove, restore, loadFrom, snapshot, serialize,
+    placements, applyPlacement, add, remove, restore, loadFrom, snapshot, serialize, boxes,
+    get revision() { return revision; },
     ensureTemplate, syncCasters, resolveUrl,
     entityFor: id => entities.get(id),
     idFor: entity => owners.get(entity),

@@ -30,7 +30,7 @@ import { Vec3 } from 'playcanvas';
 
 const PLAY_SPEED = 0.5;      // m/s along the path — owner feel pass 2026-09-03: 1.0 was "definitely too fast"
 // One-pass tour (owner 2026-09-03): an interior capture is the SAME route walked 2–3 times at
-// different heights (docs/CAPTURE-INTERIOR.md), so the raw path is 2–3× the tour. The tour ends
+// different heights (docs/CAPTURE.md), so the raw path is 2–3× the tour. The tour ends
 // where the first pass ends: the first point after which ≥ FIRST_PASS_REVISIT of the remaining
 // samples lie within FIRST_PASS_R of the path already walked (living: 30.4 of 65.7 m — the crouch
 // pass starts right there; bedroom, one loop: no cut). A cut must drop ≥ FIRST_PASS_MIN_DROP of
@@ -324,6 +324,10 @@ export function createRails({ camera, path, requestRender, onStatus = () => {}, 
     // assigns focusPoint) — the sanctioned form of the script.enabled cycle.
     if (camera.script) camera.script.enabled = true;
     active = true;
+    // Re-entry (owner decision 2026-09-05, option C): resume from where the tour was left,
+    // playing — `s` is deliberately NOT reset by exit(). If the previous pass had finished,
+    // start over (same rule as ▶ at the end), otherwise T after "tour complete" dead-ends.
+    if (s >= len - 1e-6) s = 0;
     playing = true;                           // F-13: the tour auto-plays on entry
     lookHoldUntil = 0;
     attachInput();                            // arrows/Space are claimed ONLY while touring

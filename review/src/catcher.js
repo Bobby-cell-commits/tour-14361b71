@@ -195,12 +195,17 @@ export function createCatcher(app, camera, { requestRender = () => {}, floorSize
     if (pendingMode !== null && rendersSeen >= WARM_RENDERS) {
       const m = pendingMode; pendingMode = null;
       applyMode(m);
-    } else if (pendingMode !== null) {
-      requestRender();   // keep frames coming until the material is warm
-    } else if (settleLeft > 0) {
-      settleLeft--; requestRender();   // post-flip settle burst (see SETTLE_RENDERS)
+    } else if (pendingMode === null && settleLeft > 0) {
+      settleLeft--;   // post-flip settle burst (see SETTLE_RENDERS); re-armed on frameend below
     }
   });
+  // A requestRender() from INSIDE postrender is a no-op under render-on-demand: the engine's
+  // tick clears renderNextFrame AFTER render() fires postrender (2.21.4: `render(),
+  // renderNextFrame = false`), so the warm-gate wait and the settle burst never self-pumped —
+  // each advanced ONE frame per external request (measured 2026-09-09: 12 requests → 12 renders
+  // → settled; an idle page stayed `settling` for good). 'frameend' fires after the clear, so
+  // the pumps re-arm here; postrender above only counts real renders.
+  app.on('frameend', () => { if (pendingMode !== null || settleLeft > 0) requestRender(); });
 
   function applyMode(mode) {
     cfg.mode = mode;
@@ -287,10 +292,17 @@ export function createCatcher(app, camera, { requestRender = () => {}, floorSize
     if (cfg.debugRT && shadowTex) app.drawTexture(0.6, -0.6, 0.7, 0.7, shadowTex);
   }
 
+  // settling / casterEntities / intensity exist for the eyes tool's `shadow.present` fact:
+  // plane mode has `casters` 0 by construction (registration is screen-only, above) and
+  // never reads `strength`, so a truthful "shadow pipeline live" boolean needs the
+  // enabled-entity count + the light's intensity + whether the post-flip settle is done.
   function state() {
     return {
       ...cfg, pending: pendingMode, casters: registered.length,
       rt: shadowTex ? [shadowTex.width, shadowTex.height] : null,
+      settling: settleLeft > 0,
+      casterEntities: [...listCasters, legacyCaster].filter(e => e?.enabled).length,
+      intensity: shadowSun.light.shadowIntensity,
     };
   }
 

@@ -5,7 +5,7 @@ import {
   Color, Mat4, Vec3, createGraphicsDevice, DEVICETYPE_WEBGPU, DEVICETYPE_WEBGL2,
 } from 'playcanvas';
 import { createCatcher } from './catcher.js';
-import { buildBox, normalizeGlb, createGhost } from './staging.js';
+import { buildBox, normalizeGlb, createGhost, entityAabb } from './staging.js';
 import { loadLighting, lightingPlan } from './lighting.js';
 import { loadStaging, loadCatalog, createStagingDoc } from './staging-doc.js';
 import { loadCollisionSidecar } from './collision.js';
@@ -19,6 +19,8 @@ const status = document.getElementById('status');
 const stateEl = document.getElementById('state');
 const hudEl = document.getElementById('hud');
 if (params.get('hud') === '0') { hudEl.style.display = 'none'; stateEl.style.display = 'none'; }
+// the local hub (hub.html) is a dev-serve page and is not packaged — link back to it on localhost only
+if (/^(localhost|127\.)/.test(location.hostname)) document.getElementById('hublink')?.removeAttribute('hidden');
 if (params.get('mobile') === '1') stateEl.style.cssText += 'font-size:22px;font-weight:700;color:#0f0';
 
 // --- visible refusal/error surface, own root (F-29/F-35). #status lives inside #hud, which
@@ -109,23 +111,19 @@ let ttiS = null;
 let ttfrS = null;
 
 // --- app boot: tutorial shape, device via createGraphicsDevice (WebGPU-first; the
-// engine auto-appends WEBGL2 + NULL fallbacks). ?edit=1 forces webgl2 — the sync
-// Picker returns [] on WebGPU. A GLSL→WGSL transpile fallback exists (pass
-// glslangUrl/twgslUrl wasm URLs in the options) but is NOT wired — the catcher ships
-// native WGSL twin chunks instead (catcher.js).
+// engine auto-appends WEBGL2 + NULL fallbacks). ?edit=1 follows the same rule since #10
+// (2026-09-11): the editor picks on a placements-only layer with getSelectionAsync, so
+// WebGPU is fine. A GLSL→WGSL transpile fallback exists (pass glslangUrl/twgslUrl wasm
+// URLs in the options) but is NOT wired — the catcher ships native WGSL twin chunks
+// instead (catcher.js).
 const canvas = document.createElement('canvas');
 // without this the browser owns touch gestures — a drag scrolls/zooms the PAGE and the
 // camera gets only the first few pixels before pointercancel (2026-08-31 phone session)
 canvas.style.touchAction = 'none';
 document.body.appendChild(canvas);
-const editRequested = params.get('edit') === '1';
 const deviceParam = params.get('device');           // 'webgpu' | 'webgl2'
-let deviceTypes;
-if (editRequested) {
-  deviceTypes = [DEVICETYPE_WEBGL2];
-  if (deviceParam === 'webgpu') console.warn('[viewer] ?edit=1 forces webgl2 (sync Picker)');
-} else if (deviceParam === 'webgl2') deviceTypes = [DEVICETYPE_WEBGL2];
-else deviceTypes = [DEVICETYPE_WEBGPU];             // fresh array per boot — createGraphicsDevice mutates it
+// fresh array per boot — createGraphicsDevice mutates it
+const deviceTypes = deviceParam === 'webgl2' ? [DEVICETYPE_WEBGL2] : [DEVICETYPE_WEBGPU];
 const device = await createGraphicsDevice(canvas, { deviceTypes, antialias: false });
 if (device.deviceType === 'null') {
   status.textContent = 'no graphics device (webgpu + webgl2 both unavailable)';
@@ -265,6 +263,10 @@ if (shadowParam !== 'off') catcher.setMode(shadowParam);   // warm-frame gate de
 // flat <base>/ dir as lighting.json.
 const doc = createStagingDoc(app, catcher, { requestRender, base: BASE, allowUrl: guard.isAllowed });
 const wantStaging = params.get('staging') !== '0';
+// ?staging=<name> loads + saves <name>.staging.json instead of the scene's own — a comparison
+// layout (e.g. `living-compare`) can be authored without touching the deployed staging.json.
+const stagingParam = params.get('staging');
+const stagingName = (stagingParam && stagingParam !== '0' && stagingParam !== '1') ? stagingParam : sidecarName;
 let stagingState = { loaded: false, file: null };
 
 // --- lighting.json consumer (issue #4): auto-apply when the file exists (?lighting=0
@@ -306,7 +308,7 @@ function versionOk(json, what) {
 const orNull = (p, what) => p.catch(err => { showWarning(`${what} failed to load — ${err}`); return null; });
 const docReady = Promise.all([
   params.get('lighting') !== '0' ? orNull(loadLighting(BASE, sidecarName), 'lighting.json') : Promise.resolve(null),
-  wantStaging ? orNull(loadStaging(BASE, sidecarName), 'staging.json') : Promise.resolve(null),
+  wantStaging ? orNull(loadStaging(BASE, stagingName), 'staging.json') : Promise.resolve(null),
   wantStaging ? orNull(loadCatalog(BASE), 'catalog.json') : Promise.resolve(null),
   params.get('collision') !== '0'
     ? orNull(loadCollisionSidecar(`${BASE}/${sidecarName}.voxel.json`), 'collision sidecar') : Promise.resolve(null),
@@ -323,10 +325,11 @@ const docReady = Promise.all([
     mountRails(pj);
   }
   if (vj) window.__collision = vj.collision;   // debug/automation handle (walk gates, #5 occupancy poking)
+  collisionRef = vj?.collision ?? null;         // the editor's occupancy surface (#18) reads it through ctx.getCollision
   if (nj) {
     console.log('[viewer] navmesh loaded', JSON.stringify({ file: nj._file, tris: nj.tris, area_m2: nj.area_m2, bytes: nj.bytes }));
     mountWalk(createNavWalk({ app, camera, nav: nj, spawn, requestRender, debug: params.get('navdebug') === '1',
-                              onStatus: s => { status.textContent = s; } }));
+                              onStatus: s => { status.textContent = s; }, ...navWalkOpts() }));
   } else if (vj) initWalk(vj.collision);
   lightingJson = lj;
   if (lj) applyLighting();
@@ -352,6 +355,28 @@ const docReady = Promise.all([
 // --- walk mode (issue #15): built once the voxel sidecar loads; absent sidecar = no walk ---
 let walk = null;
 let walkBtn = null;
+let collisionRef = null;
+// Placed pieces are runtime walk obstacles (#16 rider, 2026-09-14): the document's memoised boxes plus the
+// legacy ?asset= GLB while it is shown (the review-link piece — NOT the demo box placeholder, which is
+// visible on every plain page and is not part of any tour). A LIVE getter: the walk mounts before the
+// staging document has projected its placements.
+let legacyBox = { key: null, box: null };
+function walkObstacles() {
+  const boxes = doc.boxes();
+  if (shape !== 'asset' || !obj.enabled) return boxes;
+  const p = obj.getPosition(), r = obj.getEulerAngles(), s = obj.getLocalScale();
+  const key = `${p.x},${p.z},${r.y},${s.x}`;
+  if (legacyBox.key !== key) {
+    const aabb = entityAabb(obj, { fromLocals: true });
+    const mn = aabb.getMin(), mx = aabb.getMax();
+    legacyBox = { key, box: { id: 'asset', min: [mn.x, mn.y, mn.z], max: [mx.x, mx.y, mx.z] } };
+  }
+  return boxes.concat([legacyBox.box]);
+}
+// ?walkr= — the walker's body radius against placed pieces, a VERIFIER knob for the radius probe
+// (research/2026-09-14-walk-obstacles-radius.md); the product value is navwalk.js BODY_RADIUS_M.
+const walkRadiusParam = numParam('walkr', { min: 0, max: 0.5 });
+const navWalkOpts = () => ({ obstacles: walkObstacles, ...(walkRadiusParam != null ? { bodyRadius: walkRadiusParam } : {}) });
 function initWalk(collision) {
   mountWalk(createWalk({
     app, camera, collision, spawn, requestRender,
@@ -364,8 +389,10 @@ function initWalk(collision) {
 // — button, ?walk=1 and the G key — on a fine pointer until the touch controller (#12)
 // lands. viewerApi.walk.* stays open: it is the automation/gate surface, not a user path.
 const walkUiAllowed = matchMedia('(pointer: fine)').matches;
+function setWalk(w) { walk = w; syncWalkBtn(); }
 function mountWalk(w) {
-  walk = w;
+  setWalk(w);
+  if (walkBtn) return;                 // reload path: the button is mounted once
   if (!walkUiAllowed) {
     status.textContent = 'walk mode needs a mouse + keyboard — touch controls are not built yet';
     if (params.get('walk') === '1') console.warn('[viewer] ?walk=1 ignored — coarse pointer (no touch walk controls yet)');
@@ -394,6 +421,23 @@ function toggleWalk() {
   syncWalkBtn();
   requestRender();
 }
+// Re-bake loop (1b, 2026-09-11): swap the navmesh walk for one built on a freshly baked
+// <navName>.navmesh.bin — exit, refetch past the heuristic cache, dispose the old walk, re-attach.
+// Voxel-walk pages (no navmesh) refuse; the button stays mounted once.
+async function reloadNavmesh() {
+  if (!navName) return { ok: false, reason: 'no navmesh sidecar on this page (?nav=0 or none baked)' };
+  const debug = walk?.state?.().debug ?? false;
+  if (walk?.active) { walk.exit(); syncWalkBtn(); }
+  let nj = null;
+  try { nj = await loadNavmesh(`${BASE}/${navName}.navmesh.bin`, { cache: 'reload' }); }
+  catch (err) { return { ok: false, reason: `navmesh reload failed — ${err}` }; }
+  if (!nj) return { ok: false, reason: `${navName}.navmesh.bin not found` };
+  if (walk?.mode === 'navmesh') walk.dispose?.();
+  mountWalk(createNavWalk({ app, camera, nav: nj, spawn, requestRender, debug, onStatus: s => { status.textContent = s; }, ...navWalkOpts() }));
+  console.log('[viewer] navmesh reloaded', JSON.stringify({ file: nj._file, tris: nj.tris, area_m2: nj.area_m2, bytes: nj.bytes }));
+  requestRender();
+  return { ok: true, navmesh: walk.state().navmesh };
+}
 
 // --- rails tour (F-13): the pilot-safe mode. Built only when <sidecar>.path.json exists;
 // no sidecar = no button and no error. Unlike walk this is NOT gated on a fine pointer —
@@ -421,6 +465,10 @@ function toggleRails() {
 
 // --- keys ---
 addEventListener('keydown', e => {
+  // never while typing (editor note/label fields) nor while the editor's photo overlay is up —
+  // a "g" in a note toggled walk mode before this guard (2026-09-05)
+  if (e.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+  if (document.getElementById('annot-ui')) return;
   if (e.code === 'KeyB') setShape(shape === 'box' && assetTemplate ? 'asset' : 'box');
   if (e.code === 'KeyV') ghost.set(obj, !ghost.on);
   if (e.code === 'KeyN') { obj.enabled = !obj.enabled; catcher.refreshCasters(); }
@@ -457,6 +505,8 @@ window.viewerApi = {
     reset: () => walk?.reset() ?? false,
     setLook: (yaw, pitch) => walk?.setLook(yaw, pitch),
     toggleDebug: () => walk?.toggleDebug?.() ?? null,
+    step: (f, s) => walk?.step?.(f, s) ?? null,   // navmesh only; the voxel walk has no step → null
+    reload: () => reloadNavmesh(),                 // 1b: after a re-bake → {ok, navmesh{file,tris,area_m2,bytes}} | {ok:false, reason}
   },
   // rails tour (F-13) — enter/exit mirror walk's contract; step(n) is in ±1 m units of path
   // length, seek(m) is absolute metres along the tour.
@@ -536,8 +586,13 @@ if (params.get('edit') === '1') {
   import('./editor.js').then(m => m.initEditor({
     // sidecarName, not raw ?scene= — a URL-scene path would poison the Ctrl+S
     // filename (`${sceneName}.staging.json`) and the panel title
-    app, camera, catcher, doc, docReady, requestRender, sceneName: sidecarName,
+    app, camera, catcher, doc, docReady, requestRender, sceneName: sidecarName, stagingName,
     params, getLegacyObj: () => obj,
+    // 1b + #18 (2026-09-11): the zones tool names its file after the navmesh it edits, reads the walked
+    // path + spawn for the draw-time corridor estimate and reloads the walk after a re-bake; the
+    // occupancy check reads the voxel grid (null = no sidecar → the check is off).
+    navName, spawn, pathUrl: `${BASE}/${sidecarName}.path.json`, boundsUrl: navName ? `${BASE}/${navName}.bounds.json` : null,
+    reloadNavmesh, getCollision: () => collisionRef,
   })).catch(err => { console.error('[viewer] editor failed to load', err); });
 }
 requestRender();

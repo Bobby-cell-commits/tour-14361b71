@@ -53,8 +53,8 @@
                          dev; anything else is refused with a visible warning banner
     ?spawnas=<name>      sidecar name (spawn/lighting/staging) when ?scene= is a URL
                          (default living)
-    ?device=webgpu|webgl2  graphics backend (default webgpu, auto webgl2 fallback;
-                         ?edit=1 forces webgl2 — the sync Picker returns [] on WebGPU)
+    ?device=webgpu|webgl2  graphics backend (default webgpu, auto webgl2 fallback; the
+                         editor picks on both since #10 — a placements-only pick layer)
     ?dpr=<n>             render pixel ratio, clamped 0.25..native (engine default caps
                          at min(1, devicePixelRatio))
     ?budget=<n>          splat budget (app.scene.gsplat.splatBudget) — scales STREAMED
@@ -110,6 +110,7 @@
   #hud b { color: #fff; }
   #hud .title { color: #6cf; font-weight: 700; }
   #hud .dim { color: #999; }
+  #hublink { color: #fc6; font-weight: 400; margin-left: 8px; text-decoration: none; }
   #state { position: fixed; bottom: 12px; left: 12px; z-index: 10; background: rgba(0,0,0,.6);
            padding: 8px 12px; border-radius: 8px; font-size: 12px; font-family: monospace;
            white-space: pre; }
@@ -126,7 +127,7 @@
 </head>
 <body>
 <div id="hud">
-  <div class="title">walkable splat viewer — PlayCanvas 2.21.4</div>
+  <div class="title">walkable splat viewer — PlayCanvas 2.21.4 <a id="hublink" href="hub.html" hidden>⌂ hub</a></div>
   <div><b>Camera:</b> drag = orbit · WASD = fly · wheel = zoom</div>
   <div><b>Keys:</b> B box/asset · V ghost · N hide object · H shadow off→plane→screen · G walk · R respawn · M navmesh overlay</div>
   <div><b>Tour:</b> T rails tour · Space play/pause · ◀ ▶ arrows step 1 m · drag = look around</div>
