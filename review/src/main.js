@@ -13,6 +13,7 @@ import { createWalk } from './walk.js';
 import { loadNavmesh, createNavWalk } from './navwalk.js';
 import { loadPath, createRails } from './rails.js';
 import { createUrlGuard } from './urlguard.js';
+import { createHeightControl } from './height.js';
 
 const params = new URLSearchParams(location.search);
 const status = document.getElementById('status');
@@ -479,6 +480,12 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyM' && walk?.toggleDebug) walk.toggleDebug();
 });
 
+// --- ?height=1: on-the-fly view-height control for A/B-ing the filming height (height.js) ---
+const heightCtl = params.get('height') === '1'
+  ? createHeightControl({ camera, spawn, requestRender, busy: () => !!(walk?.active || rails?.active),
+                          onStatus: s => { status.textContent = s; } })
+  : null;
+
 // --- automation API (evidence workflow + the operator tool build on this) ---
 window.viewerApi = {
   setPose(pos, lookAt) {
@@ -499,6 +506,7 @@ window.viewerApi = {
   },
   setShadow: o => catcher.set(o),
   setLighting: applyLighting,
+  height: heightCtl,   // ?height=1 only (else null): {get, set(y), nudge(dy), flip}
   walk: {
     enter: () => { rails?.exit(); const ok = walk?.enter() ?? false; syncWalkBtn(); return ok; },
     exit: () => { walk?.exit(); syncWalkBtn(); },
